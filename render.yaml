@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: japan-stock-ai-free
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -b 0.0.0.0:$PORT app:APP
