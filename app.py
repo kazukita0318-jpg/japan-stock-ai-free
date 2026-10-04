@@ -206,18 +206,18 @@ def mobile_status():
 @APP.get("/api/mobile/quote")
 def mobile_quote():
     code=request.args.get("code","").strip()
-    if not code:return jsonify(error="code required"),400
+    if not code:
+        return jsonify(error="code required"),400
     if not (os.getenv("JQUANTS_API_KEY") or os.getenv("JQUANTS_ID_TOKEN")):
         return jsonify(status="unavailable",reason="J-Quants認証情報が未設定")
-try:
-         data=jq_request("/equities/bars/daily",{"code":code})
+    try:
+        data=jq_request("/equities/bars/daily",{"code":code})
         rows=normalize_quote_rows(data)
         snap=technical_snapshot(rows)
         return jsonify(status="ok",code=code,source="J-Quants",snapshot=snap,
                        rows=rows[-30:],pagination_key=data.get("pagination_key"))
-except Exception as e:
+    except Exception as e:
         return jsonify(status="error",code=code,reason=str(e)),502
-
 @APP.get("/api/mobile/final-status")
 def final_status():
     return jsonify(version=VERSION, installable=True, pwa=True, jquants_configured=jquants_status(),
