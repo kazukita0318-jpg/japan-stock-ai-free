@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 APP=Flask(__name__)
 DB=os.path.join(os.path.dirname(__file__),'events.db')
-VERSION='FREE-MOBILE-1.0'
+VERSION='FREE-MOBILE-1.1-V2'
 
 SCHEMA="""
 CREATE TABLE IF NOT EXISTS events(
@@ -138,110 +138,248 @@ def revalue():
 
 def jq_config():
     return {
-        "base": os.getenv("JQUANTS_BASE","https://api.jquants.com/v1").rstrip("/"),
-        "api_key": os.getenv("JQUANTS_API_KEY",""),
-        "id_token": os.getenv("JQUANTS_ID_TOKEN",""),
+        "base": os.getenv("JQUANTS_BASE", "https://api.jquants.com/v2").rstrip("/"),
+        "api_key": os.getenv("JQUANTS_API_KEY", "").strip(),
     }
 
+
 def jq_request(path, params=None):
-    cfg=jq_config()
-    headers={"Accept":"application/json"}
-    if cfg["id_token"]:
-        headers["Authorization"]="Bearer "+cfg["id_token"]
-    elif cfg["api_key"]:
-        headers["x-api-key"]=cfg["api_key"]
-    else:
-        raise RuntimeError("J-Quants認証情報が未設定です")
-    r=requests.get(cfg["base"]+path,params=params or {},headers=headers,timeout=15)
-    if r.status_code!=200:
+    cfg = jq_config()
+    if not cfg["api_key"]:
+        raise RuntimeError("J-Quants API繧ｭ繝ｼ縺梧悴險ｭ螳壹〒縺�")
+
+    headers = {
+        "Accept": "application/json",
+        "x-api-key": cfg["api_key"],
+    }
+    r = requests.get(
+        cfg["base"] + path,
+        params=params or {},
+        headers=headers,
+        timeout=20,
+    )
+    if r.status_code != 200:
         raise RuntimeError(f"J-Quants HTTP {r.status_code}: {r.text[:300]}")
     return r.json()
 
+
+def jquants_code(code):
+    code = str(code or "").strip()
+    if code.isdigit() and len(code) == 4:
+        return code + "0"
+    return code
+
+
 def normalize_quote_rows(data):
-    rows=data.get("daily_quotes") or data.get("prices") or []
-    out=[]
+    rows = (
+        data.get("data")
+        or data.get("daily_quotes")
+        or data.get("prices")
+        or data.get("bars")
+        or []
+    )
+
+    out = []
     for x in rows:
-        close=x.get("AdjustmentClose")
-        if close is None: close=x.get("Close")
-        if close is None: continue
+        close = x.get("AdjC")
+        if close is None:
+            close = x.get("AdjustmentClose")
+        if close is None:
+            close = x.get("C")
+        if close is None:
+            close = x.get("Close")
+        if close is None:
+            continue
+
+        open_ = x.get("AdjO")
+        if open_ is None:
+            open_ = x.get("AdjustmentOpen")
+        if open_ is None:
+            open_ = x.get("O")
+        if open_ is None:
+            open_ = x.get("Open")
+
+        high = x.get("AdjH")
+        if high is None:
+            high = x.get("AdjustmentHigh")
+        if high is None:
+            high = x.get("H")
+        if high is None:
+            high = x.get("High")
+
+        low = x.get("AdjL")
+        if low is None:
+            low = x.get("AdjustmentLow")
+        if low is None:
+            low = x.get("L")
+        if low is None:
+            low = x.get("Low")
+
+        volume = x.get("AdjVo")
+        if volume is None:
+            volume = x.get("AdjustmentVolume")
+        if volume is None:
+            volume = x.get("Vo")
+        if volume is None:
+            volume = x.get("Volume")
+
+        turnover = x.get("Va")
+        if turnover is None:
+            turnover = x.get("TurnoverValue")
+
         out.append({
-            "date":x.get("Date"),"code":x.get("Code"),
-            "open":x.get("AdjustmentOpen",x.get("Open")),
-            "high":x.get("AdjustmentHigh",x.get("High")),
-            "low":x.get("AdjustmentLow",x.get("Low")),
-            "close":close,"volume":x.get("AdjustmentVolume",x.get("Volume")),
-            "turnover":x.get("TurnoverValue")
+            "date": x.get("Date"),
+            "code": x.get("Code"),
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+            "turnover": turnover,
         })
-    out.sort(key=lambda x:x["date"] or "")
+
+    out.sort(key=lambda x: x["date"] or "")
     return out
 
+
 def technical_snapshot(rows):
-    closes=[r["close"] for r in rows if isinstance(r.get("close"),(int,float))]
-    if not closes:return {"status":"insufficient_data"}
+    closes = [
+        r["close"]
+        for r in rows
+        if isinstance(r.get("close"), (int, float))
+    ]
+    if not closes:
+        return {"status": "insufficient_data"}
+
     def ret(n):
-        if len(closes)<=n:return None
-        return (closes[-1]/closes[-1-n]-1)*100
+        if len(closes) <= n:
+            return None
+        return (closes[-1] / closes[-1 - n] - 1) * 100
+
     def vol(n=20):
-        rs=[]
-        for i in range(max(1,len(closes)-n),len(closes)):
-            if closes[i-1]:rs.append(closes[i]/closes[i-1]-1)
-        return (statistics.pstdev(rs)*100*(252**0.5)) if len(rs)>1 else None
+        rs = []
+        for i in range(max(1, len(closes) - n), len(closes)):
+            if closes[i - 1]:
+                rs.append(closes[i] / closes[i - 1] - 1)
+        return (
+            statistics.pstdev(rs) * 100 * (252 ** 0.5)
+            if len(rs) > 1
+            else None
+        )
+
     return {
-        "status":"ok","last_close":closes[-1],"last_date":rows[-1]["date"],
-        "return_20d":ret(20),"return_126d":ret(126),"return_252d":ret(252),
-        "volatility_20d_annualized":vol(20),
-        "high_20d":max(closes[-20:]) if len(closes)>=20 else max(closes),
-        "low_20d":min(closes[-20:]) if len(closes)>=20 else min(closes),
-        "sample_count":len(closes)
+        "status": "ok",
+        "last_close": closes[-1],
+        "last_date": rows[-1]["date"],
+        "return_20d": ret(20),
+        "return_126d": ret(126),
+        "return_252d": ret(252),
+        "volatility_20d_annualized": vol(20),
+        "high_20d": max(closes[-20:]) if len(closes) >= 20 else max(closes),
+        "low_20d": min(closes[-20:]) if len(closes) >= 20 else min(closes),
+        "sample_count": len(closes),
     }
 
+
 def jquants_status():
-    return bool(os.getenv("JQUANTS_API_KEY"))
+    return bool(os.getenv("JQUANTS_API_KEY", "").strip())
+
 
 @APP.get("/api/mobile/status")
 def mobile_status():
-    return jsonify(version=VERSION,jquants_configured=jquants_status(),
-                   policy="no_fabrication",server_time=now())
+    return jsonify(
+        version=VERSION,
+        jquants_configured=jquants_status(),
+        policy="no_fabrication",
+        server_time=now(),
+    )
+
 
 @APP.get("/api/mobile/quote")
 def mobile_quote():
-    code=request.args.get("code","").strip()
+    code = request.args.get("code", "").strip()
     if not code:
-        return jsonify(error="code required"),400
-    if not (os.getenv("JQUANTS_API_KEY") or os.getenv("JQUANTS_ID_TOKEN")):
-        return jsonify(status="unavailable",reason="J-Quants認証情報が未設定")
+        return jsonify(error="code required"), 400
+    if not jquants_status():
+        return jsonify(
+            status="unavailable",
+            reason="J-Quants API繧ｭ繝ｼ縺梧悴險ｭ螳壹〒縺�",
+        )
+
     try:
-        data=jq_request("/equities/bars/daily",{"code":code})
-        rows=normalize_quote_rows(data)
-        snap=technical_snapshot(rows)
-        return jsonify(status="ok",code=code,source="J-Quants",snapshot=snap,
-                       rows=rows[-30:],pagination_key=data.get("pagination_key"))
+        jq_code = jquants_code(code)
+        data = jq_request("/equities/bars/daily", {"code": jq_code})
+        rows = normalize_quote_rows(data)
+        snap = technical_snapshot(rows)
+        return jsonify(
+            status="ok",
+            code=code,
+            jquants_code=jq_code,
+            source="J-Quants API v2",
+            snapshot=snap,
+            rows=rows[-30:],
+            pagination_key=data.get("pagination_key"),
+        )
     except Exception as e:
-        return jsonify(status="error",code=code,reason=str(e)),502
+        return jsonify(
+            status="error",
+            code=code,
+            reason=str(e),
+        ), 502
+
+
 @APP.get("/api/mobile/final-status")
 def final_status():
-    return jsonify(version=VERSION, installable=True, pwa=True, jquants_configured=jquants_status(),
-                   mode="mobile_final", policy="no_fabrication")
+    return jsonify(
+        version=VERSION,
+        installable=True,
+        pwa=True,
+        jquants_configured=jquants_status(),
+        mode="mobile_final",
+        policy="no_fabrication",
+    )
+
 
 @APP.get("/api/mobile/quotes")
 def mobile_quotes():
-    code=request.args.get("code","").strip()
-    from_date=request.args.get("from")
-    to_date=request.args.get("to")
-    if not code:return jsonify(error="code required"),400
-    if not (os.getenv("JQUANTS_API_KEY") or os.getenv("JQUANTS_ID_TOKEN")):
-        return jsonify(status="unavailable",reason="J-Quants認証情報が未設定")
-    try:
-        p={"code":code}
-        if from_date:p["from"]=from_date
-        if to_date:p["to"]=to_date
-       data=jq_request("/equities/bars/daily",p)
-        rows=normalize_quote_rows(data)
-        return jsonify(status="ok",code=code,source="J-Quants",snapshot=technical_snapshot(rows),
-                       rows=rows,pagination_key=data.get("pagination_key"))
-    except Exception as e:
-        return jsonify(status="error",code=code,reason=str(e)),502
+    code = request.args.get("code", "").strip()
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
 
+    if not code:
+        return jsonify(error="code required"), 400
+    if not jquants_status():
+        return jsonify(
+            status="unavailable",
+            reason="J-Quants API繧ｭ繝ｼ縺梧悴險ｭ螳壹〒縺�",
+        )
+
+    try:
+        jq_code = jquants_code(code)
+        p = {"code": jq_code}
+        if from_date:
+            p["from"] = from_date
+        if to_date:
+            p["to"] = to_date
+
+        data = jq_request("/equities/bars/daily", p)
+        rows = normalize_quote_rows(data)
+
+        return jsonify(
+            status="ok",
+            code=code,
+            jquants_code=jq_code,
+            source="J-Quants API v2",
+            snapshot=technical_snapshot(rows),
+            rows=rows,
+            pagination_key=data.get("pagination_key"),
+        )
+    except Exception as e:
+        return jsonify(
+            status="error",
+            code=code,
+            reason=str(e),
+        ), 502
 
 
 @APP.get("/api/free/status")
@@ -251,7 +389,7 @@ def free_status():
         mode="free",
         jquants_required=False,
         data_policy="no_fabrication",
-        message="無料モード。株探等は確認用リンクとして利用し、自動スクレイピングしません。"
+        message="辟｡譁吶Δ繝ｼ繝峨よ�ｪ謗｢遲峨�遒ｺ隱咲畑繝ｪ繝ｳ繧ｯ縺ｨ縺励※蛻ｩ逕ｨ縺励∬�蜍輔せ繧ｯ繝ｬ繧､繝斐Φ繧ｰ縺励∪縺帙ｓ縲�"
     )
 
 @APP.post("/api/free/analyze")
@@ -279,7 +417,7 @@ def free_analyze():
     if not supplied:
         return jsonify(
             status="insufficient_data", code=code,
-            reason="分析に使える実データが入力されていません",
+            reason="蛻�梵縺ｫ菴ｿ縺医ｋ螳溘ョ繝ｼ繧ｿ縺悟�蜉帙＆繧後※縺�∪縺帙ｓ",
             expected_value={"20d":None,"126d":None,"252d":None}
         )
 
@@ -302,7 +440,7 @@ def free_analyze():
         expected_value={
             "status":"unavailable",
             "20d":None,"126d":None,"252d":None,
-            "reason":"OOS校正済みの無料データ履歴が十分に蓄積されるまで期待値は表示しません"
+            "reason":"OOS譬｡豁｣貂医∩縺ｮ辟｡譁吶ョ繝ｼ繧ｿ螻･豁ｴ縺悟香蛻�↓闢�ｩ阪＆繧後ｋ縺ｾ縺ｧ譛溷ｾ�､縺ｯ陦ｨ遉ｺ縺励∪縺帙ｓ"
         },
         sources={
             "market_data":"user-entered / permitted public source",
@@ -314,7 +452,7 @@ def free_analyze():
 HTML=r"""<!doctype html><html lang="ja"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#111827"><link rel="manifest" href="/static/manifest.webmanifest">
-<title>日本株AI FREE</title>
+<title>譌･譛ｬ譬ｪAI FREE</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#f3f4f6;color:#111827;font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif}
 main{max-width:760px;margin:auto;padding:12px 12px 80px}.top{background:#111827;color:#fff;padding:15px;border-radius:0 0 18px 18px;position:sticky;top:0;z-index:3}
@@ -325,39 +463,39 @@ input,select{border:1px solid #d1d5db;background:#fff}button,a.btn{border:0;back
 .secondary{background:#e5e7eb!important;color:#111827!important}.kpi{background:#f9fafb;border-radius:12px;padding:10px}.kpi b{display:block;font-size:18px}
 .row{display:flex;gap:7px;margin:7px 0}.badge{display:inline-block;padding:4px 8px;border-radius:99px;background:#eef2ff;font-size:11px;margin:2px}.warn{color:#b45309}.ok{color:#047857}
 </style></head><body><main>
-<div class="top"><h1>📈 日本株AI FREE</h1><div class="sub">完全無料モード / スマホ用 / 株探は確認用・自動取得なし</div></div>
+<div class="top"><h1>嶋 譌･譛ｬ譬ｪAI FREE</h1><div class="sub">螳悟�辟｡譁吶Δ繝ｼ繝� / 繧ｹ繝槭�逕ｨ / 譬ｪ謗｢縺ｯ遒ｺ隱咲畑繝ｻ閾ｪ蜍募叙蠕励↑縺�</div></div>
 
-<div class="card"><h3>🎯 銘柄</h3>
-<div class="grid"><input id="code" inputmode="numeric" placeholder="銘柄コード 例 7203"><input id="price" inputmode="decimal" placeholder="現在値（任意）"></div>
-<div class="row"><a id="kabutan" class="btn secondary" target="_blank" rel="noopener">株探で確認</a><button onclick="analyze()">分析する</button></div>
-<p class="muted">株探の掲載情報はブラウザで確認するための補助導線です。アプリから自動スクレイピングしません。</p></div>
+<div class="card"><h3>識 驫俶氛</h3>
+<div class="grid"><input id="code" inputmode="numeric" placeholder="驫俶氛繧ｳ繝ｼ繝� 萓� 7203"><input id="price" inputmode="decimal" placeholder="迴ｾ蝨ｨ蛟､�井ｻｻ諢擾ｼ�"></div>
+<div class="row"><a id="kabutan" class="btn secondary" target="_blank" rel="noopener">譬ｪ謗｢縺ｧ遒ｺ隱�</a><button onclick="analyze()">蛻�梵縺吶ｋ</button></div>
+<p class="muted">譬ｪ謗｢縺ｮ謗ｲ霈画ュ蝣ｱ縺ｯ繝悶Λ繧ｦ繧ｶ縺ｧ遒ｺ隱阪☆繧九◆繧√�陬懷勧蟆守ｷ壹〒縺吶ゅい繝励Μ縺九ｉ閾ｪ蜍輔せ繧ｯ繝ｬ繧､繝斐Φ繧ｰ縺励∪縺帙ｓ縲�</p></div>
 
-<div class="card"><h3>📊 株価・テクニカル実績</h3>
-<div class="grid3"><div><span class="muted">20日騰落率 %</span><input id="r20" inputmode="decimal" placeholder="例 5.2"></div>
-<div><span class="muted">126日 %</span><input id="r126" inputmode="decimal" placeholder="例 12.4"></div>
-<div><span class="muted">252日 %</span><input id="r252" inputmode="decimal" placeholder="例 18.0"></div></div></div>
+<div class="card"><h3>投 譬ｪ萓｡繝ｻ繝�け繝九き繝ｫ螳溽ｸｾ</h3>
+<div class="grid3"><div><span class="muted">20譌･鬨ｰ關ｽ邇� %</span><input id="r20" inputmode="decimal" placeholder="萓� 5.2"></div>
+<div><span class="muted">126譌･ %</span><input id="r126" inputmode="decimal" placeholder="萓� 12.4"></div>
+<div><span class="muted">252譌･ %</span><input id="r252" inputmode="decimal" placeholder="萓� 18.0"></div></div></div>
 
-<div class="card"><h3>🧩 補助評価</h3><p class="muted">分かる項目だけ入力。未入力は0点ではなく「不明」として扱います。</p>
-<div class="grid3"><div><span class="muted">決算 -100〜100</span><input id="earn" inputmode="decimal"></div>
-<div><span class="muted">政策 -100〜100</span><input id="policy" inputmode="decimal"></div>
-<div><span class="muted">需給 -100〜100</span><input id="supply" inputmode="decimal"></div></div></div>
+<div class="card"><h3>ｧｩ 陬懷勧隧穂ｾ｡</h3><p class="muted">蛻�°繧矩��岼縺�縺大�蜉帙よ悴蜈･蜉帙�0轤ｹ縺ｧ縺ｯ縺ｪ縺上御ｸ肴�縲阪→縺励※謇ｱ縺�∪縺吶�</p>
+<div class="grid3"><div><span class="muted">豎ｺ邂� -100縲�100</span><input id="earn" inputmode="decimal"></div>
+<div><span class="muted">謾ｿ遲� -100縲�100</span><input id="policy" inputmode="decimal"></div>
+<div><span class="muted">髴邨ｦ -100縲�100</span><input id="supply" inputmode="decimal"></div></div></div>
 
-<div class="card"><h3>🧠 分析結果</h3>
-<div class="grid3"><div class="kpi"><span class="muted">状態</span><b id="state">—</b></div>
-<div class="kpi"><span class="muted">プラス根拠</span><b id="pos">—</b></div>
-<div class="kpi"><span class="muted">マイナス根拠</span><b id="neg">—</b></div></div>
-<p id="result" class="muted">実データを入力すると分析します。</p></div>
+<div class="card"><h3>ｧ� 蛻�梵邨先棡</h3>
+<div class="grid3"><div class="kpi"><span class="muted">迥ｶ諷�</span><b id="state">窶�</b></div>
+<div class="kpi"><span class="muted">繝励Λ繧ｹ譬ｹ諡�</span><b id="pos">窶�</b></div>
+<div class="kpi"><span class="muted">繝槭う繝翫せ譬ｹ諡�</span><b id="neg">窶�</b></div></div>
+<p id="result" class="muted">螳溘ョ繝ｼ繧ｿ繧貞�蜉帙☆繧九→蛻�梵縺励∪縺吶�</p></div>
 
-<div class="card"><h3>🎲 短期・中期・長期期待値</h3>
-<div class="grid3"><div class="kpi"><span class="muted">20日</span><b>—</b></div><div class="kpi"><span class="muted">126日</span><b>—</b></div><div class="kpi"><span class="muted">252日</span><b>—</b></div></div>
-<p class="muted">無料データのOOS実績が十分に蓄積されるまでは、架空の期待リターンを表示しません。</p></div>
+<div class="card"><h3>軸 遏ｭ譛溘�荳ｭ譛溘�髟ｷ譛滓悄蠕�､</h3>
+<div class="grid3"><div class="kpi"><span class="muted">20譌･</span><b>窶�</b></div><div class="kpi"><span class="muted">126譌･</span><b>窶�</b></div><div class="kpi"><span class="muted">252譌･</span><b>窶�</b></div></div>
+<p class="muted">辟｡譁吶ョ繝ｼ繧ｿ縺ｮOOS螳溽ｸｾ縺悟香蛻�↓闢�ｩ阪＆繧後ｋ縺ｾ縺ｧ縺ｯ縲∵楔遨ｺ縺ｮ譛溷ｾ�Μ繧ｿ繝ｼ繝ｳ繧定｡ｨ遉ｺ縺励∪縺帙ｓ縲�</p></div>
 
-<div class="card"><h3>💼 保有株</h3><div class="grid"><input id="holdCode" placeholder="銘柄コード"><input id="holdWeight" inputmode="decimal" placeholder="比率 %"></div>
-<button onclick="addHold()" style="margin-top:8px">保存</button><div id="holds"></div></div>
+<div class="card"><h3>直 菫晄怏譬ｪ</h3><div class="grid"><input id="holdCode" placeholder="驫俶氛繧ｳ繝ｼ繝�"><input id="holdWeight" inputmode="decimal" placeholder="豈皮紫 %"></div>
+<button onclick="addHold()" style="margin-top:8px">菫晏ｭ�</button><div id="holds"></div></div>
 
-<div class="card"><h3>👀 ウォッチリスト</h3><div class="row"><input id="watchCode" placeholder="銘柄コード"><button onclick="addWatch()">追加</button></div><div id="watchs"></div></div>
+<div class="card"><h3>操 繧ｦ繧ｩ繝�メ繝ｪ繧ｹ繝�</h3><div class="row"><input id="watchCode" placeholder="驫俶氛繧ｳ繝ｼ繝�"><button onclick="addWatch()">霑ｽ蜉�</button></div><div id="watchs"></div></div>
 
-<div class="card"><h3>📱 アプリとして使う</h3><p class="muted">クラウド公開後、Android Chromeの「ホーム画面に追加」または「アプリをインストール」で起動できます。</p></div>
+<div class="card"><h3>導 繧｢繝励Μ縺ｨ縺励※菴ｿ縺�</h3><p class="muted">繧ｯ繝ｩ繧ｦ繝牙�髢句ｾ後、ndroid Chrome縺ｮ縲後�繝ｼ繝�逕ｻ髱｢縺ｫ霑ｽ蜉�縲阪∪縺溘�縲後い繝励Μ繧偵う繝ｳ繧ｹ繝医�繝ｫ縲阪〒襍ｷ蜍輔〒縺阪∪縺吶�</p></div>
 
 <script>
 const $=x=>document.getElementById(x);
@@ -365,8 +503,8 @@ function val(id){let v=$(id).value.trim();return v===''?null:Number(v)}
 function local(k){try{return JSON.parse(localStorage.getItem(k)||'[]')}catch(e){return[]}}
 function save(k,v){localStorage.setItem(k,JSON.stringify(v))}
 function render(){
- $('holds').innerHTML=local('free_holds').map(x=>`<div class="badge">${x.code} ${x.weight}%</div>`).join('')||'<p class="muted">未登録</p>';
- $('watchs').innerHTML=local('free_watch').map(x=>`<div class="badge">${x}</div>`).join('')||'<p class="muted">未登録</p>';
+ $('holds').innerHTML=local('free_holds').map(x=>`<div class="badge">${x.code} ${x.weight}%</div>`).join('')||'<p class="muted">譛ｪ逋ｻ骭ｲ</p>';
+ $('watchs').innerHTML=local('free_watch').map(x=>`<div class="badge">${x}</div>`).join('')||'<p class="muted">譛ｪ逋ｻ骭ｲ</p>';
 }
 function addHold(){let c=$('holdCode').value.trim();if(!c)return;let a=local('free_holds');a.push({code:c,weight:val('holdWeight')||0});save('free_holds',a);render()}
 function addWatch(){let c=$('watchCode').value.trim();if(!c)return;let a=local('free_watch');if(!a.includes(c))a.push(c);save('free_watch',a);render()}
@@ -374,11 +512,11 @@ function updateKabutan(){let c=$('code').value.trim();$('kabutan').href=c?'https
 $('code').addEventListener('input',updateKabutan);updateKabutan();
 async function analyze(){
  let d={code:$('code').value.trim(),price:val('price'),return20:val('r20'),return126:val('r126'),return252:val('r252'),earnings_score:val('earn'),policy_score:val('policy'),supply_score:val('supply')};
- if(!d.code){$('result').textContent='銘柄コードを入力してね';return}
+ if(!d.code){$('result').textContent='驫俶氛繧ｳ繝ｼ繝峨ｒ蜈･蜉帙＠縺ｦ縺ｭ';return}
  let r=await fetch('/api/free/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});let x=await r.json();
- if(x.status!=='ok'){$('result').textContent='⚠️ '+(x.reason||x.error||'データ不足');return}
+ if(x.status!=='ok'){$('result').textContent='笞��� '+(x.reason||x.error||'繝��繧ｿ荳崎ｶｳ');return}
  $('state').textContent=x.signal.state;$('pos').textContent=x.signal.positive_count;$('neg').textContent=x.signal.negative_count;
- $('result').textContent='根拠 '+x.signal.evidence_count+'件で判定。期待値はOOS校正データが十分になるまで未表示です。';
+ $('result').textContent='譬ｹ諡� '+x.signal.evidence_count+'莉ｶ縺ｧ蛻､螳壹よ悄蠕�､縺ｯOOS譬｡豁｣繝��繧ｿ縺悟香蛻�↓縺ｪ繧九∪縺ｧ譛ｪ陦ｨ遉ｺ縺ｧ縺吶�';
 }
 render();
 if('serviceWorker'in navigator)navigator.serviceWorker.register('/static/sw.js').catch(()=>{});
