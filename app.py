@@ -210,7 +210,7 @@ def mobile_quote():
     if not (os.getenv("JQUANTS_API_KEY") or os.getenv("JQUANTS_ID_TOKEN")):
         return jsonify(status="unavailable",reason="J-Quants認証情報が未設定")
     try:
-        data=jq_request("/prices/daily_quotes",{"code":code})
+     data=jq_request("/equities/bars/daily",{"code":code})
         rows=normalize_quote_rows(data)
         snap=technical_snapshot(rows)
         return jsonify(status="ok",code=code,source="J-Quants",snapshot=snap,
