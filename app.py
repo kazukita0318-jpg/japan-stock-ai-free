@@ -235,7 +235,7 @@ def mobile_quotes():
         p={"code":code}
         if from_date:p["from"]=from_date
         if to_date:p["to"]=to_date
-        data=jq_request("/prices/daily_quotes",p)
+       data=jq_request("/equities/bars/daily",p)
         rows=normalize_quote_rows(data)
         return jsonify(status="ok",code=code,source="J-Quants",snapshot=technical_snapshot(rows),
                        rows=rows,pagination_key=data.get("pagination_key"))
